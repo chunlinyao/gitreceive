@@ -1,8 +1,7 @@
-#!/bin/bash
+#!/usr/local/bin/bash
 
 readonly GITUSER="${GITUSER:-git}"
 readonly GITHOME="/home/$GITUSER"
-
 # Given a relative path, calculate the absolute path
 absolute_path() {
   pushd "$(dirname $1)" > /dev/null
@@ -26,7 +25,7 @@ setup_receiver_script() {
   declare home_dir="$1" git_user="$2"
   local receiver_path="$home_dir/receiver"
   cat > "$receiver_path" <<EOF
-#!/bin/bash
+#!/usr/local/bin/bash
 #URL=http://requestb.in/rlh4znrl
 #echo "----> Posting to \$URL ..."
 #curl \\
@@ -42,9 +41,45 @@ EOF
   chown "$git_user" "$receiver_path"
 }
 
+setup_permission_script() {
+  declare home_dir="$1" git_user="$2"
+  local permission_path="$home_dir/gitpermission.rb"
+  cat > "$permission_path" <<EOF
+#!/usr/local/bin/ruby
+
+require 'yaml'
+
+user  = ARGV[0]
+repo  = ARGV[1]
+command = ARGV[2]
+
+#STDERR.write "#{user} - #{command} - #{repo}\n"
+
+#command = ENV['SSH_ORIGINAL_COMMAND']
+#command =~ /git-\w+-pack '(.+)\.git'/
+repo =~ /(.+)\.git/
+repo = $1
+permissions = YAML::load_file('/home/git/permissions.yml')
+abort "command not accepted" unless command =~ /git-\w+-pack/
+abort "unexistent user" unless permissions.has_key?(user)
+abort "repo unspecified" unless (permissions[user].has_key?(repo) || permissions[user].has_key?('*'))
+abort "user can't push here" if command =~ /git-receive-pack/ && (permissions[user][repo] == "r" || permissions[user]['*'] == "r")
+
+#STDERR.write "#{user} - #{command} - #{repo}\n"
+#
+#if !File.directory?("#{repo}.git")
+#    `mkdir #{repo}.git; cd #{repo}.git; git init --bare > /dev/null`
+#end
+
+#Kernel.exec 'git', 'shell', '-c', command
+EOF
+  chmod +x "$permission_path"
+  chown "$git_user" "$permission_path"
+}
+
 # Generate a shorter, but still unique, version of the public key associated with the user doing `git push'
 generate_fingerprint() {
-  awk '{print $2}' | base64 -d | md5sum | awk '{print $1}' | sed -e 's/../:&/2g'
+  awk '{print $2}' | base64 -d | md5 | awk '{print $1}' | sed -e 's/../:&/g'
 }
 
 # Given a public key, add it to the .authorized_keys file with a 'forced command'. The 'forced command' is a syntax
@@ -94,7 +129,7 @@ ensure_prereceive_hook() {
   local hook_path="$repo_path/hooks/pre-receive"
   cd "$home_dir"
   cat > "$hook_path" <<EOF
-#!/bin/bash
+#!/usr/local/bin/bash
 cat | $self hook
 EOF
   chmod +x "$hook_path"
@@ -111,8 +146,9 @@ trigger_receiver() {
   while read oldrev newrev refname; do
     # Only run this script for the master branch. You can remove this
     # if block if you wish to run it for others as well.
-    [[ "$refname" == "refs/heads/master" ]] && \
+    if [[ "$refname" == "refs/heads/master" ]] ;then
       git archive "$newrev" | "$home_dir/receiver" "$repo" "$newrev" "$user" "$fingerprint"
+    fi
   done
 }
 
@@ -135,6 +171,8 @@ main() {
     init) # gitreceive init
       setup_git_user "$GITHOME" "$GITUSER"
       setup_receiver_script "$GITHOME" "$GITUSER"
+      setup_permission_script "$GITHOME" "$GITUSER"
+      
       echo "Created receiver script in $GITHOME for user '$GITUSER'."
       ;;
 
@@ -161,13 +199,17 @@ main() {
       ensure_bare_repo "$repo_path"
       ensure_prereceive_hook "$repo_path" "$GITHOME" "$SELF"
       cd "$GITHOME"
+
+      #check repository permission
+      #
+      $("$GITHOME/gitpermission.rb" "$RECEIVE_USER" "$RECEIVE_REPO" "$SSH_ORIGINAL_COMMAND")
+
       # $SSH_ORIGINAL_COMMAND is set by `sshd'. It stores the originally intended command to be run by `git push'. In
       # our case it is overridden by the 'forced command', so we need to reinstate it now that the 'forced command' has
       # run.
       git-shell -c "$(echo "$SSH_ORIGINAL_COMMAND" | awk '{print $1}') '$RECEIVE_REPO'"
       ;;
-
-    # Called by the pre-receive hook
+      # Called by the pre-receive hook
     hook)
       trigger_receiver "$RECEIVE_REPO" "$RECEIVE_USER" "$RECEIVE_FINGERPRINT" "$GITHOME" | strip_remote_prefix
       ;;
