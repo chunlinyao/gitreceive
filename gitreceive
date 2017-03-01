@@ -44,6 +44,7 @@ EOF
 setup_permission_script() {
   declare home_dir="$1" git_user="$2"
   local permission_path="$home_dir/gitpermission.rb"
+  touch "$home_dir/permissions.yml"
   cat > "$permission_path" <<EOF
 #!/usr/local/bin/ruby
 
